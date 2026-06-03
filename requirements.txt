@@ -1,11 +1,9 @@
-Faker==38.2.0
-joblib==1.5.2
-numpy==2.3.5
-pandas==2.3.3
+joblib==1.5.3
+narwhals==2.22.0
+numpy==2.4.6
+pandas==3.0.3
 python-dateutil==2.9.0.post0
-pytz==2025.2
-scikit-learn==1.7.2
-scipy==1.16.3
+scikit-learn==1.9.0
+scipy==1.17.1
 six==1.17.0
 threadpoolctl==3.6.0
-tzdata==2025.2

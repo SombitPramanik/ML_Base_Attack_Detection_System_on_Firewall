@@ -1,196 +1,70 @@
-# ML Firewall Attack Detection System
+# Machine Learning Base Hybrid Attack Detection Model
 
-A compact, practical toolkit for generating synthetic firewall logs, building a labeled dataset from logs, training a Random Forest classifier, and running a playback detector with a side-by-side replay UI. Intended for research, testing, and demonstration of combining simple pattern rules (port-scan / brute force) with an ML model for early warning and enrichment of firewall events.
+## Proposed by : Ramen Mahato, Sombit Pramanik, Arjit Mahapatra 
 
-Repository: [https://github.com/SombitPramanik/ML_Base_Attack_Detection_System_on_Firewall](https://github.com/SombitPramanik/ML_Base_Attack_Detection_System_on_Firewall)
+## 📖 Technical Documentation Manual
 
----
+### Architecture Overview
 
-# Key features
+The system uses a **2-Stage Hybrid Filtering Mechanism**.
 
-* Synthetic firewall log generator with multiple intensity modes and configurable attack injections.
-* Parser that extracts structured records (timestamp, src/dst IP:port, protocol, action, bytes, rule, attack tags).
-* `build_dataset_from_log()` to convert logs → CSV with labels (attack/non-attack).
-* Training pipeline using a `ColumnTransformer` + `RandomForestClassifier` saved with joblib.
-* Playback detector combining:
-
-  * Pattern-based early warnings (port-scan, brute force) using sliding window heuristics.
-  * ML predictions (probability + alerting) when a trained model is available.
-* Replay UI: side-by-side terminal view showing original log and enriched/predicted output, with configurable pause to simulate realtime.
-* Detection output written to `detections.log` (configurable).
+1. **Stage 1 (Deterministic Rules):** A low-compute sliding-window heuristics filter checks incoming logs for immediate threat signatures (such as quick repetitive port scans or brute-force attempts).
+2. **Stage 2 (Probabilistic Machine Learning):** Traffic that bypasses or triggers ambiguity in Stage 1 is evaluated by a **Random Forest Classifier** trained on temporal features (e.g., sliding window port entropy, byte ratios, and timezone hour properties). This approach drastically minimizes analyst alert fatigue.
 
 ---
 
-# Requirements
+### Module 1: `synthetic_firewall_logs.py`
 
-* Python 3.8+ recommended
-* Packages:
+This module acts as the **Data Acquisition & Preprocessing Layer (Layers 1 & 2)**. It solves the critical cyber-defence research problem of privacy-restricted datasets and PII exposure by generating realistic Syslog data.
 
-  * pandas
-  * numpy
-  * scikit-learn
-  * joblib
-  * faker
-  * python-dateutil
-* Install with pip:
+* `generate_log_line(attack_type=None, attacker_ip=None)`
+* **Purpose:** Dynamically constructs a single standardized string line matching standard enterprise firewall egress outputs.
+* **Mechanism:** Uses random address selection combined with configurable protocol ports (`22`, `23`, `80`, `443`, `8080`). It supports uppercase parameter payloads (`SRC=`, `DST=`, `BYTES=`) to ensure seamless data ingestion down the pipeline.
 
-```bash
-python3 -m pip install -r requirements.txt
-```
 
-If a `requirements.txt` is not present, install directly:
+* `main()`
+* **Purpose:** Orchestrates the runtime log streaming loop.
+* **Mechanism:** Implements an internal timer using `time.time()`. It parses the `--duration` inline argument so that the generation automatically stops after a set number of seconds, preventing single-class matrix training collapses. It uses conditional probability (`random.random() < 0.30`) to inject highly dense port scans with explicit `ATTACK=Port_Scan` markers.
 
-```bash
-python3 -m pip install pandas numpy scikit-learn joblib faker python-dateutil
-```
+
 
 ---
 
-# Files of interest
+### Module 2: `ml_firewall_system.py`
 
-* `ml_firewall_system.py` — main tool: dataset creation, training, detection playback, replay UI.
-* `synthetic_firewall_logs.py` — synthetic log generator used to create training/test data.
-* `data/` — default dataset output path (created during `build_dataset_from_log`).
-* `models/` — default model checkpoint location.
-* `detections.log` — default file where the detector writes detection entries.
+This module acts as the core controller, housing the **Feature Engineering Engine (Layer 3)**, **Hybrid Runtime Validation (Layer 4)**, and the **Analyst Table UI Layout (Layer 5)**.
 
----
+* `parse_log_line(line)`
+* **Purpose:** Converts unstructured text strings into typed Python dictionaries.
+* **Mechanism:** Employs a pre-compiled regular expression compilation pattern (`KV_RE = re.compile(r'([A-Z]+)=(\".*?\"|\S+)')`) to isolate key-value blocks. It splits tracking combinations like `IP:PORT` and formats timestamps into ISO-8601 standard representations.
 
-# Quick start — generate synthetic logs
 
-Produce a synthetic log file (mode 3 is medium-high intensity):
+* `build_dataset_from_log(log_path, out_csv)`
+* **Purpose:** Aggregates parsed logs into a structured CSV file.
+* **Mechanism:** Iterates over row streams, extracts attributes, maps ground truth categories, and sets a binary classification indicator (`1` for verified attacks, `0` for normal traffic).
 
-```bash
-python3 synthetic_firewall_logs.py --mode 3 --intervals 120 --out logs/firewall_mode3.log
-```
 
-To stream to stdout (and optionally simulate live timing):
+* `load_dataset(csv_path)`
+* **Purpose:** Sanitizes datasets and performs feature engineering before model training.
+* **Mechanism:** Converts ISO strings using `pd.to_datetime(..., format="mixed", utc=True)` to handle mixed timezones. It isolates the `.dt.hour` integer to capture temporal attack patterns and uses explicit `.astype(str)` casting to calculate network telemetry vectors (`is_internal_src`).
 
-```bash
-python3 synthetic_firewall_logs.py --mode 3 --intervals 120 --live
-```
 
----
+* `train_model(csv_path, model_out_path)`
+* **Purpose:** Calibrates the Scikit-Learn machine learning pipeline.
+* **Mechanism:** Implements a `ColumnTransformer` to scale numerical inputs (`StandardScaler`) and encode categorical labels (`OneHotEncoder`). It then trains a multi-threaded `RandomForestClassifier` and exports a `.joblib` model pipeline artifact.
 
-# Build dataset from log (CSV)
 
-Convert a log into a labeled CSV used for training:
+* `PlaybackDetector.apply_ml(rec)`
+* **Purpose:** Predicts attack probabilities for incoming records using the trained model.
+* **Mechanism:** Evaluates rows on the fly. It checks the trained model's `.classes_` array dynamically to avoid column mismatch errors if the training slice was missing an attack signature.
 
-```bash
-python3 ml_firewall_system.py --train-from-log logs/firewall_mode3.log --dataset-file data/from_log_dataset.csv
-```
 
-This produces `data/from_log_dataset.csv` with features and `label` (1 = attack, 0 = normal).
+* `PlaybackDetector.update_state_and_check(rec)`
+* **Purpose:** Maintains state for Stage 1 sliding window heuristics.
+* **Mechanism:** Tracks connection rates and unique destination ports per source IP over a 60-second window using `timedelta`.
 
----
 
-# Train model
-
-Train a Random Forest on the generated dataset and save a model:
-
-```bash
-python3 ml_firewall_system.py --train-from-log logs/firewall_mode3.log \
-  --dataset-file data/from_log_dataset.csv \
-  --model-file models/rf_from_log.joblib \
-  --n-est 150
-```
-
-You can also run `train_model` directly by passing the CSV path (CLI wrapper above handles both steps).
-
-After training the script prints a classification report and tries to compute ROC AUC on the held-out test split.
-
----
-
-# Run detector (batch playback + detections)
-
-Run the playback detector (pattern + ML) over a log and write detections:
-
-```bash
-python3 ml_firewall_system.py --detect-from-log logs/firewall_mode3.log --model-file models/rf_from_log.joblib --detection-log detections.log
-```
-
-If `--model-file` does not exist, the system will run pattern detections only and ML predictions show `N/A`.
-
-Useful flags:
-
-* `--window N` — sliding window seconds used for pattern rules (default 60).
-* `--portscan-thr N` — unique destination ports threshold (default 10).
-* `--brute-thr N` — deny count threshold for brute-force (default 5).
-* `--prob-thr F` — ML probability threshold used to mark predicted attack (default 0.45).
-* `--realtime` / `--speedup` — playback real timestamps accelerated by `--speedup`.
-
----
-
-# Replay UI — side-by-side terminal view
-
-Human-friendly side-by-side table showing original log vs enriched/predicted output:
-
-```bash
-python3 ml_firewall_system.py --replay-ui logs/firewall_mode3.log --model-file models/rf_from_log.joblib --pause 1
-```
-
-* `--pause` controls seconds between lines to simulate realtime.
-* The UI prints ML probability and writes detection lines to `detections.log` as it runs.
-
----
-
-# Detection log format
-
-Detections are appended to the configured detection file in a single-line, human-parseable format, for example:
-
-```
-2025-10-19T12:00:10+0530 DETECTION type=ML_ALERT src=10.0.1.5 dst=5.6.7.8:22 details="prob=0.812 tagged=ssh_bruteforce"
-```
-
-This makes it straightforward to ingest detections into other tools or to parse for alerting.
-
----
-
-# Recommendations & next steps
-
-1. **Address class imbalance:** Attack events may be rare. Use stratified sampling, resampling (SMOTE) or class weights when training.
-2. **Feature engineering:** Add features such as:
-
-   * counts per source over multiple windows,
-   * entropy of destination ports,
-   * payload-based token features (if available),
-   * byte rate / session duration approximations.
-3. **Model evaluation:** Use cross-validation, precision/recall curves, and per-attack-type evaluation. Track false positives (operational cost).
-4. **Threshold tuning:** The default `prob_threshold=0.45` is a starting point — tune using validation data and operational constraints (alert budget).
-5. **Logging & observability:** Forward `detections.log` to a central logger (syslog, ELK, Splunk) and add structured JSON output if needed.
-6. **Performance:** For large logs, consider streaming, batching feature extraction, and saving intermediate features to disk to avoid memory pressure.
-7. **Adversarial considerations:** Synthetic logs help research but may not capture real attacker behavior; augment with real traffic and red-team data if possible.
-
----
-
-# Troubleshooting
-
-* **No model loaded / predictions show N/A** — verify `--model-file` path exists and is readable. Training writes joblib model into `models/` by default.
-* **Parser fails for timestamps** — the parser expects ISO timestamps; synthetic generator’s `--time_zone` and format should match. Malformed lines are skipped.
-* **Too many false positives** — raise `--prob-thr`, tune pattern thresholds (`--portscan-thr`, `--brute-thr`), or add more discriminative features.
-* **Script cannot create directories or files** — check permissions for `data/`, `models/`, and the `detection-log` path.
-
----
-
-# Suggested experiments
-
-* Compare RandomForest vs. LightGBM / XGBoost for probabilistic ranking.
-* Train on a mix of synthetic + anonymized real flows; evaluate domain transfer.
-* Add a small online learner to adapt to concept drift (e.g., incremental updates).
-* Implement JSON output option for `detections.log` to ease downstream parsing.
-
----
-
-# Contributing
-
-Contributions welcome. Suggested workflow:
-
-1. Fork the repository.
-2. Add a focused branch for a feature or fix.
-3. Include tests (where applicable) and keep changes small.
-4. Submit a pull request with a clear description and rationale.
-
-Please document any changes to log format, feature engineering, or thresholds.
-
----
+* `replay_with_table(log_path, model_path)`
+* **Purpose:** Renders the side-by-side console UI layout.
+* **Mechanism:** Formats raw logs on the left and enriched features (such as calculated destination port entropy, matching rules, and exact machine learning probability scores) on the right.
 
