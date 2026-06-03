@@ -194,3 +194,171 @@ Please document any changes to log format, feature engineering, or thresholds.
 
 ---
 
+
+## Log format (input and detections)
+
+- **Firewall log line** (parsed by `parse_log_line`):
+
+  Example
+
+  ```
+  2025-10-19T12:00:00+0000 SRC=10.0.1.5:54321 DST=203.0.113.10:22 PROTO=TCP ACTION=DENY BYTES=120 RULE=RULE_12 ATTACK=ssh_bruteforce SEV=INFO INFO="login attempt"
+  ```
+
+  Parsed fields
+
+  - `timestamp` (ISO8601 with timezone)
+  - `SRC` → `src_ip:src_port`
+  - `DST` → `dst_ip:dst_port`
+  - `PROTO` → `protocol`
+  - `ACTION` → `action` (ALLOW/DENY)
+  - `BYTES` → `bytes` (int)
+  - `RULE` → `rule`
+  - `ATTACK` → `attack_tag` (optional, `-` or missing when unknown)
+  - `SEV` → `severity` (optional)
+  - `INFO` → `info` (optional, may be quoted)
+
+- **Detections log line** (written by detector):
+
+  ```
+  2025-10-19T12:00:10+0530 DETECTION type=ML_ALERT src=10.0.1.5 dst=5.6.7.8:22 details="prob=0.812 tagged=ssh_bruteforce"
+  ```
+
+  Fields
+
+  - `type` ∈ {`PORT_SCAN_PRED`, `BRUTE_FORCE_PRED`, `ML_ALERT`, `GROUND_TRUTH`}
+  - `src` source IP
+  - `dst` destination `IP:port`
+  - `details` free-text summary
+
+---
+
+## Synthetic generator CLI reference
+
+Use `synthetic_firewall_logs.py` to create realistic logs with injected attacks.
+
+- **Flags**
+
+  - `--mode {1,2,3,4}`
+    - 1: mostly normal traffic
+    - 2: low attack rate
+    - 3: medium-high attack rate
+    - 4: high intensity
+  - `--intervals N` number of time intervals (default 60).
+  - `--start ISO_TIME` start timestamp (defaults to now UTC).
+  - `--live` sleep between intervals to simulate real-time.
+  - `--out PATH` write to a file (otherwise stdout).
+
+- **Notes**
+
+  - Timestamps advance by `CONFIG["interval_seconds"]` (default 10s).
+  - Protocols, ports, addresses, and attack choice are randomized.
+  - Timezone is configurable via `CONFIG["time_zone"]` (default `UTC`).
+
+Examples
+
+```bash
+# Medium-high intensity to file
+python3 synthetic_firewall_logs.py --mode 3 --intervals 120 --out logs/firewall_mode3.log
+
+# Stream to stdout with live pacing
+python3 synthetic_firewall_logs.py --mode 2 --intervals 30 --live
+```
+
+---
+
+## Dataset schema (produced by build_dataset_from_log)
+
+When you run `build_dataset_from_log`, a CSV is created with columns:
+
+- `timestamp` ISO string
+- `src_ip`, `dst_ip`
+- `src_port` (int, 0 if missing)
+- `dst_port` (int, 0 if missing)
+- `protocol` (categorical, `UNK` if missing)
+- `action` (categorical, `UNK` if missing)
+- `bytes` (int)
+- `attack_tag` (string or empty)
+- `info` (string)
+- `label` (int, 1 if `attack_tag` present, else 0)
+
+Features used by the model (`train_model`):
+
+- Derived: `hour`, `is_internal_src`
+- Raw: `dst_port`, `protocol`, `action`, `bytes`
+
+Model pipeline:
+
+- `ColumnTransformer([OneHotEncoder(cat), StandardScaler(num)])` → `RandomForestClassifier(n_estimators=150, random_state=42)`
+
+---
+
+## End-to-end workflow (beginner friendly)
+
+1. **Generate logs**
+
+   ```bash
+   python3 synthetic_firewall_logs.py --mode 3 --intervals 120 --out logs/firewall_mode3.log
+   ```
+
+2. **Build dataset and train** (one command does both)
+
+   ```bash
+   python3 ml_firewall_system.py \
+     --train-from-log logs/firewall_mode3.log \
+     --dataset-file data/from_log_dataset.csv \
+     --model-file models/rf_from_log.joblib \
+     --n-est 150
+   ```
+
+3. **Run detector over a log**
+
+   ```bash
+   python3 ml_firewall_system.py \
+     --detect-from-log logs/firewall_mode3.log \
+     --model-file models/rf_from_log.joblib \
+     --detection-log detections.log
+   ```
+
+4. **Replay with side-by-side UI**
+
+   ```bash
+   python3 ml_firewall_system.py \
+     --replay-ui logs/firewall_mode3.log \
+     --model-file models/rf_from_log.joblib \
+     --pause 1
+   ```
+
+Tips
+
+- Adjust pattern thresholds: `--window`, `--portscan-thr`, `--brute-thr`.
+- Tune ML alerting with `--prob-thr` (default 0.45).
+- Use `--realtime --speedup 50` to simulate time gaps quickly.
+
+---
+
+## FAQs
+
+- **Do I need a model to see detections?**
+  - No. Pattern detections run without a model. ML fields show `N/A` until a model is provided.
+
+- **Why do I get many false positives?**
+  - Increase `--prob-thr`, raise pattern thresholds, or enrich features (see Recommendations).
+
+- **My timestamps fail to parse.**
+  - Ensure ISO8601 with timezone. Non-parseable lines are skipped.
+
+- **Where are files saved?**
+  - Datasets in `data/`, models in `models/`, detections in `detections.log` (paths configurable).
+
+---
+
+## Reproducibility notes
+
+- Dependencies are pinned in `requirements.txt`.
+- The generator uses randomness and is not seeded by default; outputs will vary across runs.
+- Model training uses `random_state=42` for the Random Forest, so training is deterministic given the same CSV.
+- For reproducible experiments:
+  - Save generated logs to a file and reuse them for dataset building.
+  - Keep the same package versions and CLI flags across runs.
+
