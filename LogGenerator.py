@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Synthetic Firewall Log Generator (multithreaded, rich protocol variety)
-Generates a CSV log file mimicking real firewall traffic with diverse protocols.
+Synthetic Firewall Log Generator (multithreaded, with action & note)
+Generates a CSV log file mimicking real firewall traffic with diverse protocols,
+action decisions and explanatory notes.
 """
 
 import csv
@@ -20,24 +21,37 @@ INTERNAL_NETS = [
     "172.16.0.0/12",
 ]
 
-# Known external servers (for services that usually talk to specific providers)
+# Pre‑compute internal networks for fast IP checking
+INTERNAL_NETWORKS = [ipaddress.IPv4Network(net) for net in INTERNAL_NETS]
+
+# Known external servers
 PUBLIC_DNS_SERVERS = ["8.8.8.8", "8.8.4.4", "1.1.1.1", "9.9.9.9"]
-WEB_SERVERS_PUBLIC = [
-    "93.184.216.34",
-    "151.101.1.140",
-    "104.16.132.229",
-]  # example.com, etc.
+WEB_SERVERS_PUBLIC = ["93.184.216.34", "151.101.1.140", "104.16.132.229"]
 GENERIC_EXTERNAL_IPS = [
     "1.0.0.1",
     "208.67.222.222",
-    "185.125.190.58",  # Cloudflare, OpenDNS, Ubuntu
+    "185.125.190.58",
     "13.107.42.14",
-    "31.13.71.36",  # Microsoft, Facebook
-    "74.125.200.100",  # Google (additional)
+    "31.13.71.36",
+    "74.125.200.100",
 ]
 
-# Sentinel to indicate destination should be internal
+# Sentinel for internal destination
 _INTERNAL_DEST = "__INTERNAL__"
+
+# Deny probability constants
+BASE_DENY_PROB = 0.15  # general denial rate
+HIGH_RISK_EXTERNAL_SERVICES = {  # services that should rarely reach the internet
+    "smb",
+    "mysql",
+    "postgresql",
+    "rdp",
+    "snmp",
+    "ldap",
+    "ldaps",
+    "kerberos",
+}
+HIGH_RISK_DENY_PROB = 0.9  # denial when these services go to WAN
 
 
 # ----------------------------------------------------------------------
@@ -50,6 +64,15 @@ def random_ip_from_cidr(cidr: str) -> str:
     max_hosts = (1 << host_bits) - 1
     random_offset = random.randint(1, max_hosts - 1)
     return str(net.network_address + random_offset)
+
+
+def is_ip_internal(ip_str: str) -> bool:
+    """Check if an IP string belongs to any internal network."""
+    try:
+        addr = ipaddress.IPv4Address(ip_str)
+        return any(addr in net for net in INTERNAL_NETWORKS)
+    except ValueError:
+        return False
 
 
 # ----------------------------------------------------------------------
@@ -75,7 +98,7 @@ TRAFFIC_TYPES = {
         "dst_ip_pool": PUBLIC_DNS_SERVERS,
         "weight": 12,
     },
-    "dns_tcp": {  # TCP DNS (zone transfers, large responses)
+    "dns_tcp": {
         "protocol": "TCP",
         "dst_port": 53,
         "dst_ip_pool": PUBLIC_DNS_SERVERS,
@@ -91,7 +114,7 @@ TRAFFIC_TYPES = {
     "rdp": {
         "protocol": "TCP",
         "dst_port": 3389,
-        "dst_ip_pool": _INTERNAL_DEST,  # mostly internal servers
+        "dst_ip_pool": _INTERNAL_DEST,
         "weight": 3,
     },
     # ---------- File transfer & mail ----------
@@ -135,13 +158,13 @@ TRAFFIC_TYPES = {
     "ntp": {
         "protocol": "UDP",
         "dst_port": 123,
-        "dst_ip_pool": ["162.159.200.1", "216.239.35.0"],  # Cloudflare, Google NTP
+        "dst_ip_pool": ["162.159.200.1", "216.239.35.0"],
         "weight": 3,
     },
     "snmp": {
         "protocol": "UDP",
         "dst_port": 161,
-        "dst_ip_pool": _INTERNAL_DEST,  # monitoring internal devices
+        "dst_ip_pool": _INTERNAL_DEST,
         "weight": 1,
     },
     "ldap": {
@@ -157,7 +180,7 @@ TRAFFIC_TYPES = {
         "weight": 1,
     },
     "kerberos": {
-        "protocol": "UDP",  # Kerberos often uses UDP/88
+        "protocol": "UDP",
         "dst_port": 88,
         "dst_ip_pool": _INTERNAL_DEST,
         "weight": 1,
@@ -185,8 +208,8 @@ TRAFFIC_TYPES = {
     # ---------- ICMP (no ports) ----------
     "icmp": {
         "protocol": "ICMP",
-        "dst_port": 0,  # no port concept
-        "dst_ip_pool": GENERIC_EXTERNAL_IPS,  # ping to external hosts
+        "dst_port": 0,
+        "dst_ip_pool": GENERIC_EXTERNAL_IPS,
         "weight": 3,
     },
     # ---------- Other / custom ----------
@@ -216,8 +239,10 @@ def _choose_traffic_type() -> str:
 # ----------------------------------------------------------------------
 def generate_random_log_entry(base_ts: float, jitter: float = 0.2) -> str:
     """
-    Return a single CSV line (without newline) for a realistic log entry.
+    Return a single CSV line (without newline) for a realistic log entry,
+    including action (allowed/denied) and a note.
     """
+    # Timestamp
     ts = base_ts + random.uniform(0, jitter)
     timestamp = (
         datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[
@@ -226,11 +251,12 @@ def generate_random_log_entry(base_ts: float, jitter: float = 0.2) -> str:
         + "Z"
     )
 
+    # Traffic type and its definition
     traffic_type = _choose_traffic_type()
     tdef = TRAFFIC_TYPES[traffic_type]
     protocol = tdef["protocol"]
 
-    # Source IP: always an internal host
+    # Source IP (always an internal host for outbound)
     src_net = random.choice(INTERNAL_NETS)
     src_ip = random_ip_from_cidr(src_net)
 
@@ -239,25 +265,63 @@ def generate_random_log_entry(base_ts: float, jitter: float = 0.2) -> str:
     if dst_pool == _INTERNAL_DEST:
         dst_ip = random_ip_from_cidr(random.choice(INTERNAL_NETS))
     else:
-        # Occasionally (10%) use an internal destination even for external pools
+        # 10% chance of an internal destination even for external pools
         if random.random() < 0.1:
             dst_ip = random_ip_from_cidr(random.choice(INTERNAL_NETS))
         else:
             dst_ip = random.choice(dst_pool)
 
-    # Source and destination ports
+    # Destination internal flag
+    dst_internal = is_ip_internal(dst_ip)
+
+    # Ports (handle ICMP specially)
     if protocol == "ICMP":
         src_port = 0
         dst_port = 0
     else:
         src_port = random.randint(49152, 65535)
         dst_port = tdef["dst_port"]
-        # Slight variation for realism (except for well-known ports we keep stable)
         dst_port += random.choice([0, 0, 0, 1, -1])
         dst_port = max(1, min(65535, dst_port))
 
+    # --- ACTION and NOTE determination ---
+    # Deny probability: high for risky services when going to external
+    if not dst_internal and traffic_type in HIGH_RISK_EXTERNAL_SERVICES:
+        deny_prob = HIGH_RISK_DENY_PROB
+    else:
+        deny_prob = BASE_DENY_PROB
+
+    if random.random() < deny_prob:
+        action = "denied"
+    else:
+        action = "allowed"
+
+    # Generate a realistic note (no commas to keep CSV simple)
+    if action == "allowed":
+        allowed_notes = [
+            "Allowed by policy",
+            "Allowed: standard outbound",
+            f"Allowed: {traffic_type} permitted",
+            "Allowed by firewall rule",
+        ]
+        note = random.choice(allowed_notes)
+    else:
+        if not dst_internal and traffic_type in HIGH_RISK_EXTERNAL_SERVICES:
+            note = f"Denied: {traffic_type} to external blocked by policy"
+        else:
+            denied_notes = [
+                "Denied by firewall policy",
+                "Denied: connection blocked",
+                "Denied: port not allowed",
+                "Denied by ACL",
+                "Denied: security policy",
+            ]
+            note = random.choice(denied_notes)
+
+    # Assemble CSV line
     return (
-        f"{timestamp},{src_ip},{dst_ip},{src_port},{dst_port},{protocol},{traffic_type}"
+        f"{timestamp},{src_ip},{dst_ip},{src_port},{dst_port},"
+        f"{protocol},{traffic_type},{action},{note}"
     )
 
 
@@ -265,10 +329,7 @@ def generate_random_log_entry(base_ts: float, jitter: float = 0.2) -> str:
 def generate_chunk(
     start_idx: int, count: int, global_start_ts: float, avg_interval: float
 ) -> list[str]:
-    """
-    Generate `count` log lines starting at logical index `start_idx`.
-    Timestamps are spaced roughly by `avg_interval` seconds, with jitter.
-    """
+    """Generate `count` log lines starting at logical index `start_idx`."""
     lines = []
     for i in range(count):
         line_idx = start_idx + i
@@ -281,7 +342,7 @@ def generate_chunk(
 # ----------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate synthetic firewall logs in CSV format with diverse protocols."
+        description="Generate synthetic firewall logs with action and note."
     )
     parser.add_argument(
         "-n",
@@ -316,7 +377,6 @@ def main():
     start_ts = now_ts - args.timespan
     avg_interval = args.timespan / total if total > 1 else 0.0
 
-    # Split work across threads
     chunk_size = max(1, total // args.threads)
     futures = []
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -329,16 +389,17 @@ def main():
                 )
             )
 
-    # Collect results
     all_lines = []
     for future in as_completed(futures):
         all_lines.extend(future.result())
 
-    # Sort by timestamp (lexicographic sort works because of ISO format)
+    # Sort by timestamp (ISO format allows simple string sort)
     all_lines.sort()
 
-    # Write CSV
-    header = "timestamp,sourceIP,destinationIP,source port,destination port,Protocol,traffic type"
+    header = (
+        "timestamp,sourceIP,destinationIP,source port,destination port,"
+        "Protocol,traffic type,action,note"
+    )
     with open(args.output, "w", newline="") as f:
         f.write(header + "\n")
         for line in all_lines:

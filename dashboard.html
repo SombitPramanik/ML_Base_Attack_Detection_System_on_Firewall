@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hybrid Firewall Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        body {
+            background: #0f172a;
+        }
+
+        .card {
+            transition: transform 0.2s;
+        }
+
+        .card:hover {
+            transform: scale(1.02);
+        }
+
+        #log-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #log-container::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+
+        #log-container::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+
+<body class="text-gray-100 font-sans antialiased">
+    <header class="bg-gradient-to-r from-slate-800 to-slate-900 py-6 px-4 shadow-lg">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <h1 class="text-center text-3xl font-bold tracking-tight">
+                <span class="text-cyan-400">Hybrid</span> Firewall Live Monitor
+            </h1>
+            <div class="flex items-center gap-2 text-sm">
+                <span class="h-3 w-3 bg-green-500 rounded-full animate-pulse"></span>
+                <span class="text-gray-300">Live</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-8">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <div class="card bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-xl">
+                <h3 class="text-gray-400 text-sm uppercase tracking-wide">Total Packets</h3>
+                <div id="total" class="text-4xl font-bold mt-2 text-white">0</div>
+            </div>
+            <div class="card bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-xl">
+                <h3 class="text-gray-400 text-sm uppercase tracking-wide">Allowed (safe)</h3>
+                <div id="allowed" class="text-4xl font-bold mt-2 text-green-400">0</div>
+                <div class="text-xs text-gray-500 mt-1" id="allowed-percent">0%</div>
+            </div>
+            <div class="card bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-xl">
+                <h3 class="text-gray-400 text-sm uppercase tracking-wide">Denied by Firewall</h3>
+                <div id="denied" class="text-4xl font-bold mt-2 text-amber-400">0</div>
+                <div class="text-xs text-gray-500 mt-1" id="denied-percent">0%</div>
+            </div>
+            <div class="card bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-xl">
+                <h3 class="text-gray-400 text-sm uppercase tracking-wide">Blocked by ML</h3>
+                <div id="blocked_ml" class="text-4xl font-bold mt-2 text-rose-400">0</div>
+                <div class="text-xs text-gray-500 mt-1" id="blocked-percent">0%</div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-xl">
+                <h3 class="text-gray-300 text-lg font-semibold mb-4">Traffic Distribution</h3>
+                <div class="relative h-64">
+                    <canvas id="pieChart"></canvas>
+                </div>
+            </div>
+            <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-xl">
+                <h3 class="text-gray-300 text-lg font-semibold mb-4">Packet Counts</h3>
+                <div class="relative h-64">
+                    <canvas id="barChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+
+    </main>
+
+    <script>
+        // ----- DOM elements -----
+        const totalEl = document.getElementById('total');
+        const allowedEl = document.getElementById('allowed');
+        const deniedEl = document.getElementById('denied');
+        const blockedEl = document.getElementById('blocked_ml');
+        const allowedPctEl = document.getElementById('allowed-percent');
+        const deniedPctEl = document.getElementById('denied-percent');
+        const blockedPctEl = document.getElementById('blocked-percent');
+        const logEl = document.getElementById('log');
+
+        // ----- Charts -----
+        const pieCtx = document.getElementById('pieChart').getContext('2d');
+        const pieChart = new Chart(pieCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Allowed', 'Denied', 'Blocked by ML'],
+                datasets: [{
+                    data: [0, 0, 0],
+                    backgroundColor: ['#22c55e', '#f59e0b', '#f43f5e'],
+                    borderColor: '#1e293b',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { color: '#94a3b8', padding: 20 }
+                    }
+                }
+            }
+        });
+
+        const barCtx = document.getElementById('barChart').getContext('2d');
+        const barChart = new Chart(barCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Allowed', 'Denied', 'Blocked by ML'],
+                datasets: [{
+                    label: 'Count',
+                    data: [0, 0, 0],
+                    backgroundColor: ['#22c55e', '#f59e0b', '#f43f5e'],
+                    borderRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: { beginAtZero: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                    x: { ticks: { color: '#94a3b8' } }
+                },
+                plugins: {
+                    legend: { display: false }
+                }
+            }
+        });
+
+        // Update counters, percentages, charts
+        function updateUI(stats) {
+            const total = stats.total || 0;
+            const allowed = stats.allowed || 0;
+            const denied = stats.denied || 0;
+            const blocked = stats.blocked_by_ml || 0;
+
+            totalEl.textContent = total;
+            allowedEl.textContent = allowed;
+            deniedEl.textContent = denied;
+            blockedEl.textContent = blocked;
+
+            if (total > 0) {
+                allowedPctEl.textContent = ((allowed / total) * 100).toFixed(1) + '%';
+                deniedPctEl.textContent = ((denied / total) * 100).toFixed(1) + '%';
+                blockedPctEl.textContent = ((blocked / total) * 100).toFixed(1) + '%';
+            }
+
+            pieChart.data.datasets[0].data = [allowed, denied, blocked];
+            pieChart.update();
+            barChart.data.datasets[0].data = [allowed, denied, blocked];
+            barChart.update();
+        }
+
+        // ----- REST stats polling -----
+        async function fetchStats() {
+            try {
+                const res = await fetch('/stats');
+                const stats = await res.json();
+                updateUI(stats);
+            } catch (e) { console.error(e); }
+        }
+        fetchStats();
+        setInterval(fetchStats, 2000);
+
+    </script>
+</body>
+
+</html>

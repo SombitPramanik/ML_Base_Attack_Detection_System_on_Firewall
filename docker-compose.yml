@@ -1,0 +1,9 @@
+services:
+  hybrid-firewall:
+    build: .
+    container_name: hybrid_firewall
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./logs:/app/logs          # optional: persist CSV logs outside container
+    restart: unless-stopped
