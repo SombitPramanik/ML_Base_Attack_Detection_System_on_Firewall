@@ -5,5 +5,5 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./logs:/app/logs          # optional: persist CSV logs outside container
+      - ./logs:/app/logs/ 
     restart: unless-stopped
